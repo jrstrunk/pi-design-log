@@ -1,0 +1,15 @@
+{
+  "name": "pi-design-log",
+  "version": "1.0.0",
+  "description": "Persistent per-project design log for Pi. Auto-captures user prompts and provides a tool for recording design decisions, Q&A, and key principles that survive context compaction.",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  }
+}
