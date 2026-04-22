@@ -15,11 +15,18 @@
  *   - Strong emphasis injection on every agent turn with full log content
  *   - `/design` command to view the log
  *   - `/design-clear` command to reset (with confirmation)
+ *   - `/review` command to start a fresh session reviewing code changes against the design log
  *
  * Placement: ~/.pi/agent/extensions/design-log.ts (global, works for all projects)
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import {
+	truncateHead,
+	formatSize,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+} from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import {
@@ -30,6 +37,7 @@ import {
 	appendFileSync,
 } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { tmpdir } from "node:os";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -299,6 +307,124 @@ ${content}
 			if (ok) {
 				clearLog(ctx.cwd);
 				ctx.ui.notify("Design log cleared.", "info");
+			}
+		},
+	});
+
+	// ── 7. /review command ─────────────────────────────────────────────────
+	//
+	// Starts a completely fresh session (blank slate) with:
+	//   - All uncommitted code changes (unstaged + staged + untracked)
+	//   - Design log reference
+	//   - Thorough review instructions
+	//
+	// The new session cannot be influenced by prior reasoning, ensuring
+	// an unbiased code review against the design decisions.
+
+	pi.registerCommand("review", {
+		description: "Review all uncommitted code changes against the design log in a fresh session",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+
+			// 1. Gather all uncommitted changes
+			const diffResult = await pi.exec("git", ["diff"], { cwd: ctx.cwd, timeout: 10000 });
+			const cachedResult = await pi.exec("git", ["diff", "--cached"], { cwd: ctx.cwd, timeout: 10000 });
+			const untrackedResult = await pi.exec(
+				"git", ["ls-files", "--others", "--exclude-standard"],
+				{ cwd: ctx.cwd, timeout: 10000 },
+			);
+
+			const hasUnstaged = diffResult.stdout.trim().length > 0;
+			const hasStaged = cachedResult.stdout.trim().length > 0;
+			const untrackedFiles = untrackedResult.stdout.trim().split("\n").filter(Boolean);
+
+			if (!hasUnstaged && !hasStaged && untrackedFiles.length === 0) {
+				ctx.ui.notify("No uncommitted changes to review.", "warning");
+				return;
+			}
+
+			// 2. Build diff content
+			let diffContent = "";
+
+			if (hasUnstaged) {
+				diffContent += "=== Unstaged Changes ===\n" + diffResult.stdout + "\n";
+			}
+			if (hasStaged) {
+				diffContent += "=== Staged Changes ===\n" + cachedResult.stdout + "\n";
+			}
+			if (untrackedFiles.length > 0) {
+				diffContent += "=== Untracked Files ===\n";
+				for (const file of untrackedFiles) {
+					const filePath = resolve(ctx.cwd, file);
+					if (!existsSync(filePath)) continue;
+					try {
+						const stat = await import("node:fs").then((fs) => fs.statSync(filePath));
+						if (stat.size > 20_000) {
+							diffContent += `\n+++ ${file} (new file, ${formatSize(stat.size)} — use read tool)\n`;
+							continue;
+						}
+						const content = readFileSync(filePath, "utf8");
+						diffContent += `\n+++ ${file} (new file)\n${content}\n`;
+					} catch {
+						diffContent += `\n+++ ${file} (could not read)\n`;
+					}
+				}
+			}
+
+			// 3. Truncate if large, save full version to temp file
+			const truncation = truncateHead(diffContent, {
+				maxLines: DEFAULT_MAX_LINES,
+				maxBytes: DEFAULT_MAX_BYTES,
+			});
+
+			let diffForPrompt = truncation.content;
+			if (truncation.truncated) {
+				const tmpFile = resolve(tmpdir(), `pi-review-${Date.now()}.diff`);
+				writeFileSync(tmpFile, diffContent, "utf8");
+				diffForPrompt +=
+					`\n\n[Diff truncated: ${truncation.outputLines} of ${truncation.totalLines} lines ` +
+					`(${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}). ` +
+					`Full diff saved to: ${tmpFile}]`;
+			}
+
+			// 4. Check design log
+			const hasDesignLog = !isEmpty(readLog(ctx.cwd));
+
+			// 5. Build review prompt
+			let prompt = "## Code Review Request\n\n";
+			prompt += "Review the following uncommitted code changes.\n\n";
+
+			if (hasDesignLog) {
+				prompt +=
+					"A design log exists for this project. Use the `design_log` tool to read it before starting your review. " +
+					"The design log contains the original prompts, design decisions, and key principles that should guide this review.\n\n";
+			}
+
+			prompt += "### Changes\n\n```diff\n" + diffForPrompt + "\n```\n\n";
+
+			prompt += "### Review Instructions\n\n";
+			prompt += "Look at the code changes. ";
+			if (hasDesignLog) {
+				prompt += "Do they match the intent laid out by the design log? ";
+			}
+			prompt += "Were any code smells left behind? Were any patterns used that are inconsistent or could be improved? ";
+			prompt += "Are there any bugs in the implementation? Was any TODO or tech debt left to do? ";
+			prompt += "Be thorough in your analysis. Go for the gold standard of software engineering.";
+
+			// 6. Create a fresh session — blank slate, no prior reasoning
+			const result = await ctx.newSession({
+				parentSession: ctx.sessionManager.getSessionFile(),
+				setup: async (sm) => {
+					sm.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: prompt }],
+						timestamp: Date.now(),
+					});
+				},
+			});
+
+			if (result.cancelled) {
+				ctx.ui.notify("Review session cancelled.", "warning");
 			}
 		},
 	});

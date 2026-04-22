@@ -1,12 +1,13 @@
 # pi-design-log
 
-A [Pi coding agent](https://github.com/badlogic/pi-mono) extension that maintains a persistent per-project design log.
+A [Pi coding agent](https://github.com/badlogic/pi-mono) extension that maintains a persistent per-project design log and provides a fresh-session code review against it.
 
 ## What it does
 
 - **Auto-captures** every interactive user prompt into `.pi/design-log.md`
 - Provides a **`design_log` tool** for the LLM to record design decisions, Q&A, and key principles
 - **Survives compaction** — the full log is re-injected on every agent turn via `before_agent_start`, so the agent always has complete design context
+- **`/review`** command creates a fresh session with all uncommitted changes and reviews them against the design log
 - **`/design`** command to view log status
 - **`/design-clear`** command to reset (with confirmation)
 
@@ -43,13 +44,25 @@ Just talk to pi. The extension:
 1. Auto-captures your prompts to `.pi/design-log.md`
 2. Reminds the agent every turn to use the `design_log` tool for recording decisions
 3. The agent records Q&A decisions and principles as you discuss them
+4. When ready to commit, run `/review` for an unbiased code review in a fresh session
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
+| `/review` | Start a fresh session reviewing all uncommitted changes against the design log |
 | `/design` | Show design log file path and status |
 | `/design-clear` | Clear the design log (with confirmation) |
+
+### `/review` flow
+
+1. Waits for the agent to finish current work
+2. Gathers all uncommitted changes: unstaged diffs, staged diffs, and untracked files
+3. Truncates large diffs (saves full version to a temp file the agent can read)
+4. Creates a **completely fresh session** (blank slate, no prior reasoning)
+5. Sends a review prompt with the diffs, design log reference, and thorough review instructions
+
+The fresh session ensures the review is unbiased — no prior reasoning can influence the analysis.
 
 ### Tool actions
 
